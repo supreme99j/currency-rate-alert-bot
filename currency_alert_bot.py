@@ -1,6 +1,7 @@
 # currency_alert_bot.py
 import sqlite3
 import logging
+import requests
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
@@ -8,6 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # === НАСТРОЙКИ ===
 TOKEN = "test"
 DB_PATH = "user_data.db"
+BINANCE_URL = "https://api.binance.com/api/v3/ticker/price?symbol="
 
 # === ЛОГИРОВАНИЕ ===
 logging.basicConfig(
@@ -70,12 +72,41 @@ def get_expectations(user_id):
     conn.close()
     return rows
 
+def get_all_active_expectations():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, user_id, symbol, price_min, price_max FROM expectations WHERE active=1")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def trigger_expectation(exp_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "UPDATE expectations SET active=0, triggered_at=? WHERE id=?",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), exp_id)
+    )
+    conn.commit()
+    conn.close()
+
 def cancel_expectation(user_id, exp_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE expectations SET active=0 WHERE id=? AND user_id=?", (exp_id, user_id))
     conn.commit()
     conn.close()
+
+# === ФУНКЦИИ ДЛЯ РАБОТЫ С ЦЕНАМИ ===
+def get_price(symbol: str) -> float | None:
+    try:
+        resp = requests.get(BINANCE_URL + symbol.upper(), timeout=5)
+        data = resp.json()
+        if "price" in data:
+            return float(data["price"])
+    except Exception as e:
+        logger.error(f"Ошибка получения цены {symbol}: {e}")
+    return None
 
 # === КОМАНДЫ БОТА ===
 async def start(update: Update, context: CallbackContext):
@@ -154,16 +185,40 @@ async def handle_message(update: Update, context: CallbackContext):
             parse_mode="Markdown"
         )
 
+# === ПРОВЕРКА ОЖИДАНИЙ ===
+async def check_expectations(context: CallbackContext):
+    expectations = get_all_active_expectations()
+    for exp_id, user_id, symbol, pmin, pmax in expectations:
+        price = get_price(symbol)
+        if price is None:
+            continue
+
+        # Проверка попадания или пересечения диапазона
+        if (pmin <= price <= pmax) or (price < pmin and price > pmax):  # пересечение
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"🔔 {symbol} достиг диапазона {pmin}-{pmax}\nТекущая цена: {price}"
+                )
+                trigger_expectation(exp_id)
+            except Exception as e:
+                logger.error(f"Ошибка при отправке уведомления: {e}")
+
 # === ЗАПУСК БОТА ===
 def main():
     init_db()
     app = Application.builder().token(TOKEN).build()
 
+    # команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # задача на проверку каждые 15 сек
+    job_queue = app.job_queue
+    job_queue.run_repeating(check_expectations, interval=15, first=5)
 
     app.run_polling()
 
