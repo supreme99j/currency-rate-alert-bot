@@ -97,6 +97,20 @@ def cancel_expectation(user_id, exp_id):
     conn.commit()
     conn.close()
 
+def get_history(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, symbol, price_min, price_max, created_at, triggered_at
+        FROM expectations
+        WHERE user_id=? AND active=0 AND triggered_at IS NOT NULL
+        ORDER BY triggered_at DESC
+        LIMIT 10
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 # === ФУНКЦИИ ДЛЯ РАБОТЫ С ЦЕНАМИ ===
 def get_price(symbol: str) -> float | None:
     try:
@@ -130,6 +144,7 @@ async def help_command(update: Update, context: CallbackContext):
         "/help – список команд\n"
         "/list – показать активные ожидания\n"
         "/cancel ID – отменить ожидание по ID\n\n"
+        "/history – последние 10 срабатываний\n\n"
         "👉 Также можно просто написать: `SYMBOL min-max`\n"
         "Пример: `BTCUSDT 90000-90500`",
         parse_mode="Markdown"
@@ -143,8 +158,7 @@ async def list_command(update: Update, context: CallbackContext):
         return
 
     msg = "📋 Твои активные ожидания:\n"
-    for exp in expectations:
-        exp_id, symbol, pmin, pmax, created = exp
+    for exp_id, symbol, pmin, pmax, created in expectations:
         msg += f"ID {exp_id}: {symbol} {pmin}-{pmax} (создано {created})\n"
     await update.message.reply_text(msg)
 
@@ -157,6 +171,20 @@ async def cancel_command(update: Update, context: CallbackContext):
     exp_id = int(context.args[0])
     cancel_expectation(user.id, exp_id)
     await update.message.reply_text(f"Ожидание ID {exp_id} отменено.")
+
+async def history_command(update: Update, context: CallbackContext):
+    user = update.effective_user
+    history = get_history(user.id)
+    if not history:
+        await update.message.reply_text("Истории срабатываний пока нет.")
+        return
+
+    msg = "📜 Последние срабатывания:\n"
+    for exp_id, symbol, pmin, pmax, created, triggered in history:
+        msg += (f"ID {exp_id}: {symbol} {pmin}-{pmax}\n"
+                f"Создано: {created}\n"
+                f"Сработало: {triggered}\n\n")
+    await update.message.reply_text(msg)
 
 async def handle_message(update: Update, context: CallbackContext):
     user = update.effective_user
@@ -193,8 +221,7 @@ async def check_expectations(context: CallbackContext):
         if price is None:
             continue
 
-        # Проверка попадания или пересечения диапазона
-        if (pmin <= price <= pmax) or (price < pmin and price > pmax):  # пересечение
+        if pmin <= price <= pmax:
             try:
                 await context.bot.send_message(
                     chat_id=user_id,
@@ -209,14 +236,13 @@ def main():
     init_db()
     app = Application.builder().token(TOKEN).build()
 
-    # команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("history", history_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # задача на проверку каждые 15 сек
     job_queue = app.job_queue
     job_queue.run_repeating(check_expectations, interval=15, first=5)
 
