@@ -1,13 +1,19 @@
 # currency_alert_bot.py
+import os
 import sqlite3
 import logging
 import requests
+from dotenv import load_dotenv
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
 # === НАСТРОЙКИ ===
-TOKEN = "test"
+load_dotenv()
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN не задан. Установите переменную окружения.")
+    
 DB_PATH = "user_data.db"
 BINANCE_URL = "https://api.binance.com/api/v3/ticker/price?symbol="
 
